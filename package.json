@@ -1,0 +1,16 @@
+{
+  "name": "venice-search-bench",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "bench": "bun src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}
