@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import { applyCondition, CONDITIONS } from './conditions'
 import { answerStringInResults, authoritativeShare, goldDomainHit, goldUrlRank, hitsText, identifierCoverage, MAX_CLAIMS, parseCitations } from './grade'
-import { mcnemarExactP, mean, ndcgAtK, pairedBootstrapCI, percentile, precisionAtK, wilson } from './metrics'
+import { type KeyedScore, mcnemarExactP, mean, ndcgAtK, pairedBootstrapCI, percentile, pooledScores, precisionAtK, wilson } from './metrics'
 import { answerJobs, pairwisePairs, runPaths } from './run'
 import {
   ARM_LABELS,
@@ -16,10 +16,11 @@ import {
   type RetrievalJudgeRecord,
   type RunConfig,
   type SearchArm,
+  type SearchHit,
   type SearchRecord,
   type Usage,
 } from './types'
-import { readJson, readJsonl, writeJson } from './util'
+import { normalizeUrl, readJson, readJsonl, writeJson, writeJsonl } from './util'
 import { SEARCH_PRICE_USD, usageCostUsd } from './venice'
 
 export interface RunData {
@@ -39,6 +40,13 @@ const k3 = (arm: Arm, condition: ConditionId, qid: string) => `${arm}/${conditio
 /** Matches the top-5 cutoff of the judged metrics, so every provider is scored on the same number of results. */
 const GOLD_URL_CUTOFF = 5
 const withinGoldCutoff = (rank: number): boolean => rank >= 1 && rank <= GOLD_URL_CUTOFF
+
+/** 1 if a gold URL is in the top results and 0 if not; null without gold URLs or a search. */
+function goldUrlHit(data: RunData, arm: SearchArm, q: Query): number | null {
+  const search = data.search.get(k2(arm, q.id))
+  const rank = search ? goldUrlRank(search.hits, q.goldUrls) : null
+  return rank === null ? null : withinGoldCutoff(rank) ? 1 : 0
+}
 
 export async function loadRun(runDir: string): Promise<RunData> {
   const config = await readJson<RunConfig>(runPaths.config(runDir))
@@ -110,6 +118,70 @@ export function retrievalScore(data: RunData, arm: SearchArm, qid: string): Retr
   const judged = data.retrieval.get(k2(arm, qid))
   if (!judged?.relevance) return null
   return { p5: precisionAtK(judged.relevance, 5), ndcg5: ndcgAtK(judged.relevance, 5) }
+}
+
+const pageKey = (hit: SearchHit): string => normalizeUrl(hit.url) ?? hit.url
+
+interface JudgedPage extends KeyedScore {
+  chars: number
+}
+
+/** Judged top-5 pages per provider; null until every provider with results has been judged, so all share one pool. */
+function judgedPages(data: RunData, qid: string): Map<SearchArm, JudgedPage[]> | null {
+  const pages = new Map<SearchArm, JudgedPage[]>()
+  for (const arm of data.config.arms.filter(isSearchArm)) {
+    const search = data.search.get(k2(arm, qid))
+    if (!search) return null
+    if (search.status !== 'ok') {
+      pages.set(arm, [])
+      continue
+    }
+    const relevance = data.retrieval.get(k2(arm, qid))?.relevance
+    if (!relevance) return null
+    pages.set(
+      arm,
+      search.hits.slice(0, relevance.length).map((hit, i) => ({ key: pageKey(hit), score: relevance[i] ?? 0, chars: hit.content.length })),
+    )
+  }
+  return pages
+}
+
+/** nDCG@5 with each page scored by its best-scoring copy, which compares the pages ranked rather than the text returned. */
+export function perPageNdcg(data: RunData, qid: string): Map<SearchArm, number> | null {
+  const pages = judgedPages(data, qid)
+  if (!pages) return null
+  const pooled = pooledScores([...pages.values()])
+  return new Map([...pages.keys()].map((arm, i) => [arm, ndcgAtK(pooled[i] ?? [], 5)]))
+}
+
+/** Pairs of providers' copies of the same page: how many scored the same, and how many of the rest scored lower on the shorter copy. */
+export function sharedPageAgreement(data: RunData): { pairs: number; same: number; shorterLower: number } {
+  let pairs = 0
+  let same = 0
+  let shorterLower = 0
+  for (const q of data.queries) {
+    const pages = judgedPages(data, q.id)
+    if (!pages) continue
+    const copies = new Map<string, JudgedPage[]>()
+    for (const ranking of pages.values()) {
+      const best = new Map<string, JudgedPage>()
+      for (const page of ranking) {
+        const seen = best.get(page.key)
+        if (!seen || page.score > seen.score) best.set(page.key, page)
+      }
+      for (const [key, page] of best) copies.set(key, [...(copies.get(key) ?? []), page])
+    }
+    for (const list of copies.values()) {
+      for (const [i, a] of list.entries()) {
+        for (const b of list.slice(i + 1)) {
+          pairs++
+          if (a.score === b.score) same++
+          else if (a.score < b.score ? a.chars < b.chars : b.chars < a.chars) shorterLower++
+        }
+      }
+    }
+  }
+  return { pairs, same, shorterLower }
 }
 
 const answerArms = (config: RunConfig, condition: ConditionId): Arm[] => config.arms.filter(arm => isSearchArm(arm) || condition === 'native')
@@ -186,10 +258,13 @@ function equalBudgetSection(data: RunData): string {
 
 function retrievalSection(data: RunData): string {
   const rows: string[][] = []
+  const perPage = new Map(data.queries.map(q => [q.id, perPageNdcg(data, q.id)]))
+  const agreement = sharedPageAgreement(data)
   for (const arm of data.config.arms.filter(isSearchArm)) {
     const searches = data.queries.map(q => data.search.get(k2(arm, q.id))).filter((s): s is SearchRecord => s !== undefined)
     const ok = searches.filter(s => s.status === 'ok')
     const scores = data.queries.map(q => retrievalScore(data, arm, q.id)).filter((s): s is RetrievalScore => s !== null)
+    const perPageScores = data.queries.map(q => perPage.get(q.id)?.get(arm)).filter((v): v is number => v !== undefined)
     const gold = data.queries.filter(q => q.goldAnswer)
     const inResults = gold.map(q => data.retrieval.get(k2(arm, q.id))?.answerInResults).filter((v): v is boolean => typeof v === 'boolean')
     const stringHits = gold
@@ -213,6 +288,7 @@ function retrievalSection(data: RunData): string {
       num(mean(ok.map(s => s.hits.reduce((n, h) => n + h.content.length, 0))), 0),
       num(mean(scores.map(s => s.p5))),
       num(mean(scores.map(s => s.ndcg5))),
+      num(mean(perPageScores)),
       inResults.length ? `${pct(ratio(inResults.filter(Boolean).length, inResults.length))} (n=${inResults.length})` : '—',
       stringHits.length ? `${pct(ratio(stringHits.filter(Boolean).length, stringHits.length))} (n=${stringHits.length})` : '—',
       ranks.length ? `${pct(ratio(ranks.filter(withinGoldCutoff).length, ranks.length))} (n=${ranks.length})` : '—',
@@ -222,9 +298,16 @@ function retrievalSection(data: RunData): string {
   return [
     '## Retrieval quality (results as returned)',
     '',
-    `The judge reads the full text of each of the top 5 results. P@5 counts results it scored 2 or 3; nDCG@5 is normalised against five perfect results. Errors and empty results score 0. "Answer in results" asks the judge whether the gold answer can be read from the top 5 results; "gold string" is an exact normalised match against all returned text. Gold URL hit and MRR also stop at rank ${GOLD_URL_CUTOFF}, so every provider is scored on the same number of results.`,
+    `The judge reads the full text of each of the top 5 results. P@5 counts results it scored 2 or 3; nDCG@5 is normalised against five perfect results. Per-page nDCG@5 gives every copy of a page the best score any provider's copy of it got, so it compares the pages each provider ranked rather than the text it sent back. Errors and empty results score 0. "Answer in results" asks the judge whether the gold answer can be read from the top 5 results; "gold string" is an exact normalised match against all returned text. Gold URL hit and MRR also stop at rank ${GOLD_URL_CUTOFF}, so every provider is scored on the same number of results.`,
     '',
-    table(['Arm', 'n', 'Empty', 'Errors', 'Mean results', 'Mean content chars', 'P@5', 'nDCG@5', 'Answer in results', 'Gold string in results', `Gold URL hit@${GOLD_URL_CUTOFF}`, `MRR@${GOLD_URL_CUTOFF}`], rows),
+    table(['Arm', 'n', 'Empty', 'Errors', 'Mean results', 'Mean content chars', 'P@5', 'nDCG@5', 'Per-page nDCG@5', 'Answer in results', 'Gold string in results', `Gold URL hit@${GOLD_URL_CUTOFF}`, `MRR@${GOLD_URL_CUTOFF}`], rows),
+    ...(agreement.pairs > 0
+      ? [
+          '',
+          `Pages in more than one provider's top 5: ${agreement.pairs} provider pairs, scored the same in ${pct(ratio(agreement.same, agreement.pairs), 0)} of them.` +
+            (agreement.pairs > agreement.same ? ` Where the scores differed, the shorter copy scored lower in ${pct(ratio(agreement.shorterLower, agreement.pairs - agreement.same), 0)} of pairs.` : ''),
+        ]
+      : []),
   ].join('\n')
 }
 
@@ -307,37 +390,48 @@ interface PairedRow {
   condition: ConditionId
 }
 
+/** Δ, interval, discordant counts, and exact McNemar p for paired 0/1 outcomes. */
+function pairedBinary(aVals: readonly number[], bVals: readonly number[]): string[] | null {
+  const ci = pairedBootstrapCI(aVals, bVals)
+  if (!ci) return null
+  const onlyA = aVals.filter((a, i) => a > (bVals[i] ?? a)).length
+  const onlyB = bVals.filter((b, i) => b > (aVals[i] ?? b)).length
+  const pp = (x: number) => `${x >= 0 ? '+' : ''}${(100 * x).toFixed(1)}`
+  return [String(ci.n), pp(ci.delta), `${pp(ci.lo)} – ${pp(ci.hi)}`, String(onlyA), String(onlyB), mcnemarExactP(onlyA, onlyB).toFixed(3)]
+}
+
 function pairedCorrectness(data: RunData, pair: PairedRow): string[] | null {
   const aVals: number[] = []
   const bVals: number[] = []
-  let onlyA = 0
-  let onlyB = 0
   for (const q of data.queries) {
     const a = isCorrect(data.correctness.get(k3(pair.a, pair.condition, q.id)))
     const b = isCorrect(data.correctness.get(k3(pair.b, pair.condition, q.id)))
     if (a === null || b === null) continue
     aVals.push(a)
     bVals.push(b)
-    if (a > b) onlyA++
-    if (b > a) onlyB++
   }
-  const ci = pairedBootstrapCI(aVals, bVals)
-  if (!ci) return null
-  const pp = (x: number) => `${x >= 0 ? '+' : ''}${(100 * x).toFixed(1)}`
-  return [pair.label, CONDITIONS[pair.condition].label, String(ci.n), pp(ci.delta), `${pp(ci.lo)} – ${pp(ci.hi)}`, String(onlyA), String(onlyB), mcnemarExactP(onlyA, onlyB).toFixed(3)]
+  const cells = pairedBinary(aVals, bVals)
+  return cells && [pair.label, CONDITIONS[pair.condition].label, ...cells]
 }
 
-function pairedRetrieval(data: RunData, a: SearchArm, b: SearchArm): string[] | null {
+type ArmScore = (arm: SearchArm, q: Query) => number | null | undefined
+
+/** Scores for the queries both arms have one for, in query order. */
+function pairedScores(data: RunData, a: SearchArm, b: SearchArm, score: ArmScore): [number[], number[]] {
   const aVals: number[] = []
   const bVals: number[] = []
   for (const q of data.queries) {
-    const sa = retrievalScore(data, a, q.id)
-    const sb = retrievalScore(data, b, q.id)
-    if (!sa || !sb) continue
-    aVals.push(sa.ndcg5)
-    bVals.push(sb.ndcg5)
+    const sa = score(a, q)
+    const sb = score(b, q)
+    if (sa === null || sa === undefined || sb === null || sb === undefined) continue
+    aVals.push(sa)
+    bVals.push(sb)
   }
-  const ci = pairedBootstrapCI(aVals, bVals)
+  return [aVals, bVals]
+}
+
+function pairedRetrieval(data: RunData, a: SearchArm, b: SearchArm, score: ArmScore): string[] | null {
+  const ci = pairedBootstrapCI(...pairedScores(data, a, b, score))
   if (!ci) return null
   const signed = (x: number) => `${x >= 0 ? '+' : ''}${x.toFixed(3)}`
   return [`${a} vs ${b}`, String(ci.n), signed(ci.delta), `${signed(ci.lo)} – ${signed(ci.hi)}`]
@@ -351,13 +445,24 @@ function pairedSection(data: RunData): string {
       if (row) correctnessRows.push(row)
     }
   }
-  const retrievalRows = pairwisePairs(data.config.arms.filter(isSearchArm))
-    .map(([a, b]) => pairedRetrieval(data, a as SearchArm, b as SearchArm))
+  const perPage = new Map(data.queries.map(q => [q.id, perPageNdcg(data, q.id)]))
+  const searchPairs = pairwisePairs(data.config.arms.filter(isSearchArm)) as [SearchArm, SearchArm][]
+  const retrievalTable = (label: string, score: ArmScore): string => {
+    const rows = searchPairs
+      .map(([a, b]) => pairedRetrieval(data, a, b, score))
+      .filter((row): row is string[] => row !== null)
+    return rows.length ? table(['Pair (A vs B)', 'n', `Δ ${label}`, '95% CI'], rows) : '_No judged retrieval yet._'
+  }
+  const goldUrlRows = searchPairs
+    .map(([a, b]) => {
+      const cells = pairedBinary(...pairedScores(data, a, b, (arm, q) => goldUrlHit(data, arm, q)))
+      return cells && [`${a} vs ${b}`, ...cells]
+    })
     .filter((row): row is string[] => row !== null)
   return [
     '## Paired comparisons',
     '',
-    'Each comparison uses only queries both arms have a grade for. Δ is the first arm minus the second, with a 95% paired bootstrap interval. "Only A/B correct" are the discordant pairs behind the exact McNemar p-value. Intervals that cross 0 are not a measured difference.',
+    'Each comparison uses only queries both arms have a grade for. Δ is the first arm minus the second, with a 95% paired bootstrap interval. The "Only A" and "Only B" columns are the discordant pairs behind the exact McNemar p-value. Intervals that cross 0 are not a measured difference.',
     '',
     correctnessRows.length
       ? table(['Pair (A vs B)', 'Condition', 'n', 'Δ correct (pp)', '95% CI (pp)', 'Only A correct', 'Only B correct', 'McNemar p'], correctnessRows, 2)
@@ -365,7 +470,17 @@ function pairedSection(data: RunData): string {
     '',
     '### Retrieval nDCG@5',
     '',
-    retrievalRows.length ? table(['Pair (A vs B)', 'n', 'Δ nDCG@5', '95% CI'], retrievalRows) : '_No judged retrieval yet._',
+    retrievalTable('nDCG@5', (arm, q) => retrievalScore(data, arm, q.id)?.ndcg5),
+    '',
+    '### Retrieval per-page nDCG@5',
+    '',
+    retrievalTable('per-page nDCG@5', (arm, q) => perPage.get(q.id)?.get(arm)),
+    '',
+    `### Gold URL hit@${GOLD_URL_CUTOFF}`,
+    '',
+    goldUrlRows.length
+      ? table(['Pair (A vs B)', 'n', 'Δ hit (pp)', '95% CI (pp)', 'Only A hit', 'Only B hit', 'McNemar p'], goldUrlRows)
+      : '_No queries with gold URLs yet._',
   ].join('\n')
 }
 
@@ -383,12 +498,18 @@ function sliceSection(data: RunData): string {
         return s.n === 0 ? '—' : pct(ratio(s.correct, s.n), 0)
       }),
       ...searchArms.map(arm => num(mean(queries.map(q => retrievalScore(data, arm, q.id)?.ndcg5).filter((v): v is number => v !== undefined)))),
+      ...searchArms.map(arm => {
+        const searches = queries.map(q => data.search.get(k2(arm, q.id))).filter((s): s is SearchRecord => s !== undefined)
+        return searches.length === 0 ? '—' : pct(ratio(searches.filter(s => s.status !== 'ok').length, searches.length), 0)
+      }),
     ]
   })
   return [
     '## By slice (native)',
     '',
-    table(['Slice', 'n', ...arms.map(arm => `${arm} correct`), ...searchArms.map(arm => `${arm} nDCG@5`)], rows),
+    table(['Slice', 'n', ...arms.map(arm => `${arm} correct`), ...searchArms.map(arm => `${arm} nDCG@5`), ...searchArms.map(arm => `${arm} no results`)], rows),
+    '',
+    'No results counts searches that came back empty or failed.',
   ].join('\n')
 }
 
@@ -408,11 +529,7 @@ function codingMetrics(data: RunData, arm: Arm, queries: readonly Query[]): Codi
   return {
     correct: ratio(s.correct, s.n),
     ndcg5: isSearchArm(arm) ? values(q => retrievalScore(data, arm, q.id)?.ndcg5) : null,
-    goldUrlHit: values(q => {
-      const hits = search(q)?.hits
-      const rank = hits ? goldUrlRank(hits, q.goldUrls) : null
-      return rank === null ? null : withinGoldCutoff(rank) ? 1 : 0
-    }),
+    goldUrlHit: values(q => (isSearchArm(arm) ? goldUrlHit(data, arm, q) : null)),
     authoritative: values(q => {
       const hits = search(q)?.hits
       return hits ? authoritativeShare(hits, q.authoritativeDomains) : null
@@ -523,6 +640,7 @@ function headerSection(data: RunData): string {
 const NOTES = `## Notes
 
 - Providers return different numbers of results and different amounts of text per result (see "Mean results" and "Mean content chars"). The budgeted conditions even out that volume, but because they keep the start of each result, they work against results whose useful text sits further down the page.
+- nDCG@5 scores the text each provider sent back, so a short extract can score lower than a longer copy of the same page. Per-page nDCG@5 removes that difference for pages more than one provider returned; pages only one provider returned keep that provider's format.
 - Empty results get a closed-book answer, and failed searches count as not attempted.
 - Grades come from an LLM judge. Spot-check \`results.csv\` and the per-query JSON before trusting small differences.
 - Search results are a snapshot at fetch time, and gold answers can go stale; check \`validAsOf\` on time-sensitive queries.`
@@ -553,11 +671,12 @@ const csvCell = (value: unknown): string => {
 export function renderCsv(data: RunData): string {
   const header = [
     'queryId', 'slice', 'subSlice', 'style', 'language', 'arm', 'condition', 'searchStatus', 'searchQuery', 'hits', 'contentChars',
-    'searchLatencyMs', 'searchTotalMs', 'searchAttempts', 'answerStatus', 'correctness', 'relevance', 'p5', 'ndcg5', 'answerInResults',
+    'searchLatencyMs', 'searchTotalMs', 'searchAttempts', 'answerStatus', 'correctness', 'relevance', 'p5', 'ndcg5', 'perPageNdcg5', 'answerInResults',
     'goldStringInResults', 'goldUrlRank', 'goldDomainHit', 'authoritativeShare', 'identifiersInResults', 'identifiersInAnswer',
     'citationClaims', 'citationSupported', 'invalidCitations', 'answerCitations', 'promptTokens', 'completionTokens', 'answerLatencyMs',
   ]
   const lines = [header.join(',')]
+  const perPage = new Map(data.queries.map(q => [q.id, perPageNdcg(data, q.id)]))
   for (const q of data.queries) {
     for (const { arm, condition } of answerJobs(data.config)) {
       const answer = data.answers.get(k3(arm, condition, q.id))
@@ -571,7 +690,7 @@ export function renderCsv(data: RunData): string {
           q.id, q.slice, q.subSlice, q.style, q.language, arm, condition, search?.status, search?.searchQuery, search?.hits.length,
           search?.hits.reduce((n, h) => n + h.content.length, 0), search?.latencyMs, search?.totalMs, search?.attempts, answer?.status,
           data.correctness.get(k3(arm, condition, q.id))?.label, retrieval?.relevance?.join('|'), score?.p5, score?.ndcg5,
-          retrieval?.answerInResults, search ? answerStringInResults(search.hits, q.goldAnswer) : null, search ? goldUrlRank(search.hits, q.goldUrls) : null,
+          isSearchArm(arm) ? perPage.get(q.id)?.get(arm) : null, retrieval?.answerInResults, search ? answerStringInResults(search.hits, q.goldAnswer) : null, search ? goldUrlRank(search.hits, q.goldUrls) : null,
           search ? goldDomainHit(search.hits, q.goldUrls) : null, search ? authoritativeShare(search.hits, q.authoritativeDomains) : null,
           search ? identifierCoverage(hitsText(seen), q.goldIdentifiers) : null,
           answer?.status === 'ok' ? identifierCoverage(answer.content, q.goldIdentifiers) : null,
@@ -588,6 +707,7 @@ export function renderCsv(data: RunData): string {
 
 export function summarize(data: RunData): Record<string, unknown> {
   const arms: Record<string, unknown> = {}
+  const perPage = new Map(data.queries.map(q => [q.id, perPageNdcg(data, q.id)]))
   for (const arm of data.config.arms) {
     const correct: Record<string, number | null> = {}
     for (const condition of data.config.conditions) {
@@ -604,6 +724,7 @@ export function summarize(data: RunData): Record<string, unknown> {
     arms[arm] = {
       correct,
       ndcg5: mean(scores.map(s => s.ndcg5)),
+      perPageNdcg5: mean(data.queries.map(q => perPage.get(q.id)?.get(arm)).filter((v): v is number => v !== undefined)),
       p5: mean(scores.map(s => s.p5)),
       errorRate: ratio(searches.filter(s => s.status === 'error').length, searches.length),
       emptyRate: ratio(searches.filter(s => s.status === 'empty').length, searches.length),
@@ -614,12 +735,55 @@ export function summarize(data: RunData): Record<string, unknown> {
   return { runId: data.config.runId, createdAt: data.config.createdAt, mock: data.config.mock, queries: data.queries.length, spend: runSpend(data), arms }
 }
 
+/** Error messages are left out because they come from upstream APIs verbatim. */
+export function exportAnswers(data: RunData): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = []
+  for (const q of data.queries) {
+    for (const { arm, condition } of answerJobs(data.config)) {
+      const answer = data.answers.get(k3(arm, condition, q.id))
+      if (!answer) continue
+      rows.push({
+        queryId: q.id,
+        arm,
+        condition,
+        model: answer.model,
+        status: answer.status,
+        correctness: data.correctness.get(k3(arm, condition, q.id))?.label ?? null,
+        answer: answer.content,
+      })
+    }
+  }
+  return rows
+}
+
+/** Page text is left out so published results don't republish the pages, and error messages as in `exportAnswers`. */
+export function exportHits(data: RunData): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = []
+  for (const q of data.queries) {
+    for (const arm of data.config.arms.filter(isSearchArm)) {
+      const search = data.search.get(k2(arm, q.id))
+      if (!search) continue
+      const relevance = data.retrieval.get(k2(arm, q.id))?.relevance
+      rows.push({
+        queryId: q.id,
+        arm,
+        searchQuery: search.searchQuery,
+        status: search.status,
+        hits: search.hits.map((h, i) => ({ rank: i + 1, title: h.title, url: h.url, date: h.date, contentChars: h.content.length, relevance: relevance?.[i] ?? null })),
+      })
+    }
+  }
+  return rows
+}
+
 export async function writeReport(runDir: string): Promise<{ report: string; files: string[] }> {
   const data = await loadRun(runDir)
   const report = renderReport(data)
-  const files = [join(runDir, 'report.md'), join(runDir, 'results.csv'), join(runDir, 'summary.json')]
+  const files = ['report.md', 'results.csv', 'summary.json', 'answers.jsonl', 'hits.jsonl'].map(name => join(runDir, name))
   await Bun.write(files[0] as string, report)
   await Bun.write(files[1] as string, renderCsv(data))
   await writeJson(files[2] as string, summarize(data))
+  await writeJsonl(files[3] as string, exportAnswers(data))
+  await writeJsonl(files[4] as string, exportHits(data))
   return { report, files }
 }

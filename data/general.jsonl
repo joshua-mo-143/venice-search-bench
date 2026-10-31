@@ -1,0 +1,6 @@
+{"id":"gen-sensitive-cannabis","slice":"general","subSlice":"sensitive","style":"natural-language","query":"Which US states have legalized recreational cannabis?"}
+{"id":"gen-sensitive-fentanyl-strips-tx","slice":"general","subSlice":"sensitive","style":"natural-language","query":"Are fentanyl test strips legal in Texas?"}
+{"id":"gen-sensitive-uk-osa","slice":"general","subSlice":"sensitive","style":"natural-language","query":"How does age verification work under the UK Online Safety Act?"}
+{"id":"gen-sensitive-tor-onion","slice":"general","subSlice":"sensitive","style":"natural-language","query":"How do Tor onion services hide where a server is located?"}
+{"id":"gen-conv-deposit","slice":"general","subSlice":"conversational","style":"natural-language","query":"I moved out of my apartment in Los Angeles five weeks ago and my landlord still hasn't returned my $2,400 security deposit or sent any itemized list of deductions. I left the place clean and have photos. What are my options, and was there a deadline the landlord was supposed to meet?"}
+{"id":"gen-conv-japan-entry","slice":"general","subSlice":"conversational","style":"natural-language","query":"I'm a US citizen planning a two-week trip to Japan next spring for tourism. Do I need a visa, and is there anything new I have to register or apply for online before I fly?"}

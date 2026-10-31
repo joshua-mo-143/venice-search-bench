@@ -3,10 +3,22 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { RESULTS_HEADING } from '../src/prompt'
-import { loadRun, runSpend, writeReport } from '../src/report'
+import { ndcgAtK } from '../src/metrics'
+import { loadRun, perPageNdcg, type RunData, runSpend, sharedPageAgreement, writeReport } from '../src/report'
 import { answerJobs, answerPrompt, answerRequest, estimateCost, executeRun, type RunContext, runPaths } from '../src/run'
-import { ALL_ARMS, type AnswerRecord, CONDITION_IDS, type CorrectnessRecord, type Query, type RunConfig, type SearchRecord } from '../src/types'
-import { readJson, writeJson, writeJsonl } from '../src/util'
+import {
+  ALL_ARMS,
+  type AnswerRecord,
+  CONDITION_IDS,
+  type CorrectnessRecord,
+  type Query,
+  type RetrievalJudgeRecord,
+  type RunConfig,
+  type SearchArm,
+  type SearchHit,
+  type SearchRecord,
+} from '../src/types'
+import { readJson, readJsonl, writeJson, writeJsonl } from '../src/util'
 import { ApiError, MockBackend, type ModelInfo } from '../src/venice'
 
 const queries: Query[] = [
@@ -109,10 +121,53 @@ describe('end-to-end with the mock backend', () => {
       expect(report).toContain(heading)
     }
     expect(report).toContain('mock backend, numbers are synthetic')
+    expect(report).toContain('### Retrieval per-page nDCG@5')
+    expect(report).toContain('### Gold URL hit@5')
+    expect(report).toContain('brave no results')
     const csv = await Bun.file(files[1] as string).text()
     expect(csv.trim().split('\n')).toHaveLength(1 + queries.length * 10)
     const summary = await readJson<{ arms: Record<string, unknown> }>(files[2] as string)
     expect(Object.keys(summary?.arms ?? {})).toEqual([...ALL_ARMS])
+    const answers = await readJsonl<Record<string, unknown>>(files[3] as string)
+    expect(answers).toHaveLength(queries.length * 10)
+    expect(answers.every(a => !('error' in a))).toBe(true)
+    const hits = await readJsonl<{ hits: Record<string, unknown>[] }>(files[4] as string)
+    expect(hits).toHaveLength(queries.length * 3)
+    const flat = hits.flatMap(h => h.hits)
+    expect(flat.length).toBeGreaterThan(0)
+    expect(flat.every(h => !('content' in h) && typeof h.url === 'string')).toBe(true)
+    expect(flat.some(h => typeof h.relevance === 'number')).toBe(true)
+  })
+
+  test('per-page scores pool copies of the same page across providers', () => {
+    const query = queries[0] as Query
+    const hit = (url: string, content: string): SearchHit => ({ title: url, url, content, date: '' })
+    const searched = (arm: SearchArm, hits: SearchHit[]): SearchRecord => ({ queryId: query.id, arm, searchQuery: query.query, status: 'ok', latencyMs: 1, totalMs: 1, attempts: 1, hits, fetchedAt: '' })
+    const judged = (arm: SearchArm, relevance: number[]): RetrievalJudgeRecord => ({ queryId: query.id, arm, relevance, answerInResults: null, judgeModel: 'test' })
+    const pooled: RunData = {
+      ...data,
+      queries: [query],
+      search: new Map([
+        ['brave/gold-1', searched('brave', [hit('https://a.example/page', 'short'), hit('https://b.example/', 'other')])],
+        ['google/gold-1', searched('google', [hit('https://a.example/page', 'a much longer copy of the page')])],
+        ['exa/gold-1', searched('exa', [hit('https://c.example/', 'unrelated')])],
+      ]),
+      retrieval: new Map([
+        ['brave/gold-1', judged('brave', [1, 2])],
+        ['google/gold-1', judged('google', [3])],
+        ['exa/gold-1', judged('exa', [0])],
+      ]),
+    }
+    expect(perPageNdcg(pooled, query.id)).toEqual(
+      new Map([
+        ['brave', ndcgAtK([3, 2], 5)],
+        ['google', ndcgAtK([3], 5)],
+        ['exa', ndcgAtK([0], 5)],
+      ]),
+    )
+    expect(sharedPageAgreement(pooled)).toEqual({ pairs: 1, same: 0, shorterLower: 1 })
+    pooled.retrieval.delete('exa/gold-1')
+    expect(perPageNdcg(pooled, query.id)).toBeNull()
   })
 
   test('spend bills searches that did not fail and prices recorded usage', () => {

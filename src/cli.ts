@@ -1,6 +1,6 @@
 import { join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
-import { loadQueries } from './datasets'
+import { DEFAULT_DATASETS, downloadCached, FRAMES_URL, framesQueries, loadQueries, SIMPLEQA_URL, simpleQAQueries } from './datasets'
 import { writeReport } from './report'
 import { estimateCost, executeRun, runPaths } from './run'
 import { ALL_ARMS, CONDITION_IDS, type ModelPrice, type Query, type RunConfig } from './types'
@@ -22,15 +22,16 @@ Commands
   run         Search, answer, and grade a query set, then write a report
   report      Rebuild report.md, results.csv, and summary.json for a run
   validate    Check query files and print their composition
+  import      Sample a public question set (simpleqa or frames) into data/
   models      List Venice text models with privacy tier and pricing
 
 Run options
-  --dataset <file>          Query file (repeatable; default data/seed.jsonl)
+  --dataset <file>          Query file (repeatable; default: the ${DEFAULT_DATASETS.length} files in data/)
   --arms <list>             brave,google,exa,none (default: all)
   --conditions <list>       native,k5-2k,k5-8k (default: all)
   --search-limit <n>        Results requested per search (default 10, max 20)
   --limit <n>               Sample n queries, stratified by slice
-  --seed <n>                Sampling seed for --limit (default 1)
+  --seed <n>                Sampling seed for --limit and import (default 1)
   --slice <name>            Only queries in this slice (repeatable)
   --ids <list>              Only these query ids
   --answer-model <id>       Default ${DEFAULT_MODELS.answer}
@@ -52,6 +53,8 @@ Run options
 
 Other options
   --run <run-id>            Run to rebuild (report)
+  --n <n>                   Questions to sample (import; default 100)
+  --out <file>              Output file (import; default data/<set>-<n>.jsonl)
   --all                     Include models that are not private-tier (models)
 
 Environment
@@ -87,6 +90,8 @@ const { values, positionals } = parseArgs({
     name: { type: 'string' },
     resume: { type: 'string' },
     run: { type: 'string' },
+    n: { type: 'string', default: '100' },
+    out: { type: 'string' },
     all: { type: 'boolean', default: false },
     help: { type: 'boolean', short: 'h', default: false },
   },
@@ -109,7 +114,7 @@ function list<T extends string>(name: string, value: string | undefined, allowed
   return [...new Set(items)] as T[]
 }
 
-const datasetPaths = (): string[] => (values.dataset?.length ? values.dataset : [join(ROOT, 'data', 'seed.jsonl')]).map(p => resolve(p))
+const datasetPaths = (): string[] => (values.dataset?.length ? values.dataset : DEFAULT_DATASETS.map(f => join(ROOT, 'data', f))).map(p => resolve(p))
 
 function makeBackend(): Backend {
   if (values.mock) return new MockBackend()
@@ -273,6 +278,19 @@ async function cmdValidate(): Promise<void> {
   }
 }
 
+async function cmdImport(): Promise<void> {
+  const which = positionals[1]
+  const n = int('n', values.n)
+  const seed = int('seed', values.seed, 0)
+  let queries: Query[]
+  if (which === 'simpleqa') queries = simpleQAQueries(await downloadCached(SIMPLEQA_URL, join(ROOT, 'data', 'cache', 'simpleqa.csv')), n, seed)
+  else if (which === 'frames') queries = framesQueries(await downloadCached(FRAMES_URL, join(ROOT, 'data', 'cache', 'frames.tsv')), n, seed)
+  else throw new UsageError('usage: bun run bench import simpleqa|frames [--n 100] [--seed 1]')
+  const out = resolve(values.out ?? join(ROOT, 'data', `${which}-${n}.jsonl`))
+  await writeJsonl(out, queries)
+  log(`Wrote ${queries.length} ${which} queries to ${out}`)
+}
+
 async function cmdModels(): Promise<void> {
   const models = await makeBackend().models()
   const rows = models
@@ -297,6 +315,7 @@ const commands: Record<string, () => Promise<void>> = {
   run: cmdRun,
   report: cmdReport,
   validate: cmdValidate,
+  import: cmdImport,
   models: cmdModels,
 }
 

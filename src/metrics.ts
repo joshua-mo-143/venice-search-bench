@@ -26,6 +26,18 @@ export function ndcgAtK(scores: readonly number[], k: number, maxScore = 3): num
   return dcg / ideal
 }
 
+export interface KeyedScore {
+  key: string
+  score: number
+}
+
+/** Gives every copy of a page the best score any copy got, so a page scores the same in every ranking it appears in. */
+export function pooledScores(rankings: readonly (readonly KeyedScore[])[]): number[][] {
+  const best = new Map<string, number>()
+  for (const ranking of rankings) for (const { key, score } of ranking) best.set(key, Math.max(best.get(key) ?? score, score))
+  return rankings.map(ranking => ranking.map(({ key, score }) => best.get(key) ?? score))
+}
+
 export function wilson(successes: number, n: number, z = 1.96): { lo: number; hi: number } | null {
   if (n === 0) return null
   const p = successes / n

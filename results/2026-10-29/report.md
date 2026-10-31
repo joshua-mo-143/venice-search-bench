@@ -36,13 +36,15 @@ Same answers as above, arranged so each column gives every provider the same num
 
 ## Retrieval quality (results as returned)
 
-The judge reads the full text of each of the top 5 results. P@5 counts results it scored 2 or 3; nDCG@5 is normalised against five perfect results. Errors and empty results score 0. "Answer in results" asks the judge whether the gold answer can be read from the top 5 results; "gold string" is an exact normalised match against all returned text. Gold URL hit and MRR also stop at rank 5, so every provider is scored on the same number of results.
+The judge reads the full text of each of the top 5 results. P@5 counts results it scored 2 or 3; nDCG@5 is normalised against five perfect results. Per-page nDCG@5 gives every copy of a page the best score any provider's copy of it got, so it compares the pages each provider ranked rather than the text it sent back. Errors and empty results score 0. "Answer in results" asks the judge whether the gold answer can be read from the top 5 results; "gold string" is an exact normalised match against all returned text. Gold URL hit and MRR also stop at rank 5, so every provider is scored on the same number of results.
 
-| Arm | n | Empty | Errors | Mean results | Mean content chars | P@5 | nDCG@5 | Answer in results | Gold string in results | Gold URL hit@5 | MRR@5 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| brave | 47 | 0.0% | 0.0% | 10.0 | 14138 | 0.73 | 0.66 | 89.7% (n=29) | 81.8% (n=11) | 40.9% (n=22) | 0.31 |
-| google | 47 | 0.0% | 0.0% | 5.0 | 59548 | 0.66 | 0.64 | 86.2% (n=29) | 81.8% (n=11) | 50.0% (n=22) | 0.42 |
-| exa | 47 | 0.0% | 0.0% | 10.0 | 23223 | 0.85 | 0.78 | 96.6% (n=29) | 81.8% (n=11) | 72.7% (n=22) | 0.73 |
+| Arm | n | Empty | Errors | Mean results | Mean content chars | P@5 | nDCG@5 | Per-page nDCG@5 | Answer in results | Gold string in results | Gold URL hit@5 | MRR@5 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| brave | 47 | 0.0% | 0.0% | 10.0 | 14138 | 0.73 | 0.66 | 0.76 | 89.7% (n=29) | 81.8% (n=11) | 40.9% (n=22) | 0.31 |
+| google | 47 | 0.0% | 0.0% | 5.0 | 59548 | 0.66 | 0.64 | 0.66 | 86.2% (n=29) | 81.8% (n=11) | 50.0% (n=22) | 0.42 |
+| exa | 47 | 0.0% | 0.0% | 10.0 | 23223 | 0.85 | 0.78 | 0.80 | 96.6% (n=29) | 81.8% (n=11) | 72.7% (n=22) | 0.73 |
+
+Pages in more than one provider's top 5: 184 provider pairs, scored the same in 64% of them. Where the scores differed, the shorter copy scored lower in 76% of pairs.
 
 ## Speed, reliability, and cost
 
@@ -57,7 +59,7 @@ Latency is client-side through the Venice API, so it includes Venice and network
 
 ## Paired comparisons
 
-Each comparison uses only queries both arms have a grade for. Δ is the first arm minus the second, with a 95% paired bootstrap interval. "Only A/B correct" are the discordant pairs behind the exact McNemar p-value. Intervals that cross 0 are not a measured difference.
+Each comparison uses only queries both arms have a grade for. Δ is the first arm minus the second, with a 95% paired bootstrap interval. The "Only A" and "Only B" columns are the discordant pairs behind the exact McNemar p-value. Intervals that cross 0 are not a measured difference.
 
 | Pair (A vs B) | Condition | n | Δ correct (pp) | 95% CI (pp) | Only A correct | Only B correct | McNemar p |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -81,6 +83,22 @@ Each comparison uses only queries both arms have a grade for. Δ is the first ar
 | brave vs google | 47 | +0.024 | -0.043 – +0.087 |
 | brave vs exa | 47 | -0.121 | -0.197 – -0.050 |
 | google vs exa | 47 | -0.145 | -0.211 – -0.079 |
+
+### Retrieval per-page nDCG@5
+
+| Pair (A vs B) | n | Δ per-page nDCG@5 | 95% CI |
+| --- | ---: | ---: | ---: |
+| brave vs google | 47 | +0.101 | +0.044 – +0.157 |
+| brave vs exa | 47 | -0.033 | -0.098 – +0.031 |
+| google vs exa | 47 | -0.134 | -0.202 – -0.065 |
+
+### Gold URL hit@5
+
+| Pair (A vs B) | n | Δ hit (pp) | 95% CI (pp) | Only A hit | Only B hit | McNemar p |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| brave vs google | 22 | -9.1 | -31.8 – +13.6 | 2 | 4 | 0.688 |
+| brave vs exa | 22 | -31.8 | -54.5 – -13.6 | 0 | 7 | 0.016 |
+| google vs exa | 22 | -22.7 | -45.5 – +0.0 | 1 | 6 | 0.125 |
 
 ## By slice (native)
 
@@ -150,6 +168,7 @@ Authoritative share counts top-5 results from official docs, registries, and cod
 ## Notes
 
 - Providers return different numbers of results and different amounts of text per result (see "Mean results" and "Mean content chars"). The budgeted conditions even out that volume, but because they keep the start of each result, they work against results whose useful text sits further down the page.
+- nDCG@5 scores the text each provider sent back, so a short extract can score lower than a longer copy of the same page. Per-page nDCG@5 removes that difference for pages more than one provider returned; pages only one provider returned keep that provider's format.
 - Empty results get a closed-book answer, and failed searches count as not attempted.
 - Grades come from an LLM judge. Spot-check `results.csv` and the per-query JSON before trusting small differences.
 - Search results are a snapshot at fetch time, and gold answers can go stale; check `validAsOf` on time-sensitive queries.

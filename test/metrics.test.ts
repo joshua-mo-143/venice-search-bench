@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mcnemarExactP, mean, ndcgAtK, pairedBootstrapCI, percentile, precisionAtK, wilson } from '../src/metrics'
+import { mcnemarExactP, mean, ndcgAtK, pairedBootstrapCI, percentile, pooledScores, precisionAtK, wilson } from '../src/metrics'
 
 describe('ranking metrics', () => {
   test('precision@k divides by k even when fewer results came back', () => {
@@ -13,6 +13,24 @@ describe('ranking metrics', () => {
     expect(ndcgAtK([3], 5)).toBeLessThan(ndcgAtK([3, 3], 5))
     expect(ndcgAtK([0, 3], 5)).toBeLessThan(ndcgAtK([3, 0], 5))
     expect(ndcgAtK([], 5)).toBe(0)
+  })
+
+  test('pooled scores give every copy of a page its best score', () => {
+    const pooled = pooledScores([
+      [
+        { key: 'a', score: 1 },
+        { key: 'b', score: 2 },
+      ],
+      [
+        { key: 'b', score: 0 },
+        { key: 'a', score: 3 },
+        { key: 'c', score: 1 },
+      ],
+    ])
+    expect(pooled).toEqual([
+      [3, 2],
+      [2, 3, 1],
+    ])
   })
 })
 
