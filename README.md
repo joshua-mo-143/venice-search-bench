@@ -49,6 +49,19 @@ The first run, on 29 October, couldn't separate the providers either: without se
 
 The full report, with confidence intervals, paired comparisons, and per-slice breakdowns, is in [`results/2026-10-30/report.md`](results/2026-10-30/report.md). The same folder has every answer with its grade, and every provider's result list. The write-up is [Benchmarking Web Search Providers](https://docs.venice.ai/learn/search-provider-benchmark).
 
+### Breaking news and GitHub issues
+
+On 12 November we ran two smaller sets that aren't in the default set (see [Query set](#query-set)), to test two things it doesn't: news from the last day or two, and answers that only exist in a community thread.
+
+| Questions | n | `brave` | `google` | `exa` | No search |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Breaking news | 10 | 100.0% | 100.0% | 100.0% | 0.0% |
+| GitHub issues | 7 | 28.6% | 14.3% | 42.9% | 14.3% |
+
+The breaking-news questions are about news published from 10 to 12 November 2026. We searched them on the evening of 12 November, when the newest stories were about 8 hours old and the oldest a little over two days. Every provider had the answer in its top 5 for every question, so there's no freshness gap here for major news. The set doesn't cover smaller stories, or stories only an hour or two old. Two questions were edited in review and searched again 12 minutes later, and [`results/2026-11-12-breaking-news/`](results/2026-11-12-breaking-news/report.md) has the final version of all 10.
+
+The GitHub-issue questions are debugging questions whose answer is only in a comment on a GitHub issue, not in the project's release notes or docs. Every provider struggled, because the comment with the answer was rarely in the results: it was in the top 5 for 1 question with Brave, 1 with Google, and 2 with Exa. Brave ranked the right issue in its top 5 for 3 questions, but its result text didn't include the answer for any of them. Seven questions can't separate the providers, and the no-search answer got one right that it had missed in both screens. The results are in [`results/2026-11-12-community/`](results/2026-11-12-community/report.md).
+
 ## How a run works
 
 For every question in the query set, the harness:
@@ -125,10 +138,12 @@ A run uses seven files in `data/` by default: 162 questions, 156 of them with a 
 | `sensitive.jsonl` | 23 | Factual questions on legal topics that some services filter, such as drug law, abortion, sex work, firearms, surveillance, censorship, and internet shutdowns |
 | `general.jsonl` | 6 | Long conversational questions and questions on sensitive topics, with no gold answer, for retrieval scores and pairwise comparison |
 
-Two more files aren't in the default set:
+Four more files aren't in the default set:
 
 - **`easy-coding.jsonl` (19):** the hand-written coding questions from the first run. The model answered 15 of the 16 with a gold answer without search, so they don't separate the providers.
-- **`screened-out.jsonl` (14):** questions dropped because the model answered them without search.
+- **`breaking-news.jsonl` (10):** news published from 10 to 12 November 2026, to test whether providers have indexed the last day or two. It only tests that when run within a day or two of those dates; after that, it's ordinary news.
+- **`community.jsonl` (7):** debugging questions whose answer is only in a GitHub issue thread, not in the project's release notes or docs.
+- **`screened-out.jsonl` (18):** questions dropped because the model answered them without search.
 
 `bun run bench import simpleqa` and `bun run bench import frames --n 20` sample public question sets ([SimpleQA](https://github.com/openai/simple-evals) and [FRAMES](https://huggingface.co/datasets/google/frames-benchmark)) into `data/`. They're not in the default set because their questions and answers are published on the web, where search results can find them.
 
@@ -141,6 +156,8 @@ Every question with a gold answer was written for this benchmark, and went throu
 3. **No-search screen.** The answer model answered every question twice without search, and any question it got right either time was dropped.
 4. **Open-book check.** For the news and sensitive questions, the model was also given the source quotes as its search results, and had to answer correctly both times. This catches ambiguous questions, and checks that the model will answer a sensitive question when it has the source.
 5. **Review.** Another agent double-checked every question and gold answer against the sources. 47 questions were reworded or had their gold answer corrected, 3 were dropped, and every edited question went through the no-search screen again.
+
+For `breaking-news.jsonl` and `community.jsonl`, the agents found their sources without a web search engine, so the questions don't lean toward pages one provider indexes: news from Wikipedia's current-events pages, news feeds, and newsrooms fetched by URL, and issues through GitHub's own API.
 
 Gold answers lead with the answer, and anything after it is context that a correct answer doesn't need to repeat.
 

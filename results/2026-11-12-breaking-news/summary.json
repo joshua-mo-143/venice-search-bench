@@ -1,0 +1,63 @@
+{
+  "runId": "20261112-214401-breaking-1112",
+  "createdAt": "2026-11-12T21:44:01.234Z",
+  "mock": false,
+  "queries": 10,
+  "spend": {
+    "searchUsd": 0.3000000000000001,
+    "answerUsd": 0.37173876000000017,
+    "judgeUsd": 1.06583897,
+    "totalUsd": 1.7375777300000002,
+    "cachedTokens": 306368,
+    "unpricedModels": []
+  },
+  "arms": {
+    "brave": {
+      "correct": {
+        "native": 1,
+        "k5-2k": 1,
+        "k5-8k": 1
+      },
+      "ndcg5": 0.9178168543126789,
+      "perPageNdcg5": 0.9303369985849109,
+      "p5": 0.9399999999999998,
+      "errorRate": 0,
+      "emptyRate": 0,
+      "p50Ms": 960.5,
+      "p90Ms": 1200.1
+    },
+    "google": {
+      "correct": {
+        "native": 1,
+        "k5-2k": 0.8,
+        "k5-8k": 1
+      },
+      "ndcg5": 0.6449090665892229,
+      "perPageNdcg5": 0.6449090665892229,
+      "p5": 0.58,
+      "errorRate": 0,
+      "emptyRate": 0,
+      "p50Ms": 3664.5,
+      "p90Ms": 6437.599999999999
+    },
+    "exa": {
+      "correct": {
+        "native": 1,
+        "k5-2k": 1,
+        "k5-8k": 1
+      },
+      "ndcg5": 0.966543414647464,
+      "perPageNdcg5": 0.966543414647464,
+      "p5": 0.96,
+      "errorRate": 0,
+      "emptyRate": 0,
+      "p50Ms": 758,
+      "p90Ms": 1914.1
+    },
+    "none": {
+      "correct": {
+        "native": 0
+      }
+    }
+  }
+}
